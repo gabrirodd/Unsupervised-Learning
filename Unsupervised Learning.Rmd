@@ -1,0 +1,393 @@
+---
+title: "Unsupervised Learning"
+author: "Gabriel Rodríguez Molina"
+date: "2023-04-16"
+output: html_document
+---
+
+Midterm Project: feature engineering + unsupervised learning
+
+```{r include=FALSE}
+library(tidyverse)
+library(leaflet)
+library(sf)
+library(readxl)
+library(rgdal)
+library(stringr)
+library(ggpubr)
+library(GGally) 
+library(factoextra) 
+library(mice)
+```
+
+# 1 Objective
+
+Gain deeper insight about family dynamics and about how they can be classified across the different EU countries. I am are interested in understanding the variety of family indicators across the OECD countries by using a database created to provide comparative data on family outcomes and family policies across the OECD nations. 
+
+Unsupervised learning is ideal is this context as it can be used to explore the data, identify clusters or patterns, and provide useful insights into how the data is structured. This type of analysis can help us to better understand the relationships between the different indicators and provide us with valuable information into the different trends and patterns.
+
+# 2 Datasets I will use
+
+```{r}
+family <- read.csv("family.csv")
+demog <- read.csv("demog.csv")
+demog
+```
+
+# 3 Data pre-processing and descriptive analysis
+
+In the pre-processing data section we will have to deal with:
+
+-   Huge amount of missing values
+
+-   Diverse variables (demographic and familiar)
+
+-   High variability 
+
+We observe that there are variables related to codes as well as some variables that are repeated and are not necessary for the analysis. Therefore, these variables will be discarded.
+
+```{r}
+family <- family %>%
+  select(-SEX, -IND, -YEAR, -Unit.Code, -PowerCode.Code, -PowerCode, 
+         -Reference.Period.Code, -Reference.Period, -Flag.Codes, -Flags, -Unit, -Country)
+
+```
+
+In this context, pivot wider can be used in order to transform the data set so that all of the indicators can be used as variables for the analysis. However, when doing so, an excessive amount of NAs often result. While there are various techniques which can be used to address this problem, variables with a very high percentage of NAs often end up being too biased if filled in without taking into account the context. Thus, it is first necessary to consider which variables should be discarded before analysis can be conducted.
+
+```{r}
+pivot <- family %>% 
+  pivot_wider(names_from="Indicator", values_from="Value")
+
+sapply(pivot, function(x) sum(is.na(x))*100/nrow(pivot))
+```
+
+In this case, it appears to be methodologically optimal to include only states from Europe in the analysis. This is because on average, European countries have much fewer data points consisting of NA values due to the high quality and availability of data from the continent. Additionally, focusing on this smaller pool of countries can help to more easily analize regional geographical dynamics due to the closer geographic proximity and similar cultural and economic contexts. On the other hand, including many non-European countries, such as those located in Asia or the Americas, may lead to bias due to the presence of NA data points, less reliable observations, and a much wider range of cultural and economic contexts.
+
+```{r}
+pivot <- family %>% 
+  pivot_wider(names_from="COU", values_from="Value")
+
+sapply(pivot, function(x) sum(is.na(x))*100/nrow(pivot))
+```
+
+
+
+In our data exploration, we identified a large number of variables to potentially use for our analysis. However, some of these variables contained too much noise or did not provide meaningful insights, so we are discarding these variables from our analysis. Additionally, we are also removing any gender-based distinctions from our data, as it causes too many missing values. Lastly, we are also renaming the remaining variables for better organization and clarity.
+
+```{r}
+family <- family %>%
+  filter(Sex != "Female", Sex != "Male") %>% 
+  filter(COU %in% c("PRT","GBR","BEL","GRC","HUN","ESP","CZE","SVK","NLD","FIN","ITA","IRL",
+                    "POL","FRA","DEU","SWE","AUT","DNK","EST","LUX", "SVN","LVA","NOR","ISL",
+                    "CHE","LTU")) %>% 
+  pivot_wider(names_from="Indicator", values_from="Value") %>% 
+  transmute(
+    Country=COU,
+    Year,
+    Age_Childbirth = `Mean age of women at childbirth`, 
+    Births_outmarr = `Share of births outside of marriage (% of all births)`,
+    Gendergap_full =`Gender gap (male-less-female) in the full-time equivalent employment-to-population rate`,
+    Young_unemployed=`Proportion (%) of the population aged 15-19 neither employed nor in education or training`,
+    Youngadult_unemployed = `Proportion (%) of the population aged 20-24 neither employed nor in education or training`,
+    Infant_mortality_rate = `Infant mortality rate`, 
+    Father_paid_paternity_wks = `Length of paid paternity and parental leave reserved for fathers in weeks`, 
+    Fertility_rate_young = `Fertility rates (births per 1000) for 15-19 year olds`, 
+    Marriage_rate = `Crude marriage rate (marriages per 1000 people)`, 
+    Mother_paid_paternity_wks = `Length of paid maternity, parental and home care leave available to mothers in weeks`, 
+    Neonatal_mortality_rate = `Neonatal mortality rate`, 
+    Gender_gap = `Gender gap (male-less-female) in the employment-to-population rate`, 
+    Divorce_rate = `Crude divorce rate (divorces per 1000 people)`,
+    Fertility_rate = `Total fertility rate`
+    )
+   
+sapply(family, function(x) sum(is.na(x))*100/nrow(family))
+
+```
+
+
+We have data on 26 European countries, with 15 social variables related to family. These variables provide insights into patterns that compare and contrast family life across Europe. 
+
+As it was explained we have to deal also with diverse variables. In this context, in order to combine two different datasets we need to perform an aggregation process. The first dataset contains data from multiple sources both within and outside the OECD, while the second dataset includes many additional demographic variables related to families. Both datasets have distinct structures, so we must figure out how to make them compatible and create a single data frame. In this case we will filter information only concerning both genders and discard the years which are not included in the previous dataset and then join them both.
+
+```{r}
+demog <- demog %>%
+  filter(SUBJECT == "TOT", TIME >= 1990) %>% 
+  select(-INDICATOR, -MEASURE, -Flag.Codes, -FREQUENCY, -SUBJECT)
+
+final_df <- family %>% 
+  left_join(demog,
+    by = c("Country" = "LOCATION", "Year"="TIME")        
+)
+
+```
+
+The mice function is a statistical tool used to impute data that is missing in a dataset. This is done by estimating the missing values through averaging observed values from similar countries in the dataset. The "rf" method specifically uses a random forest technique to identify similar countries and assign them an average of the observed values. The parameter "m"is related to the number of times the imputation is done, in this case it is done four times. Each time the imputation is finished, more information is available and thus it's possible to make a more accurate estimate of the missing values.
+
+```{r}
+m = 4 
+mice_mod <- mice(final_df, m=m, method='rf') 
+final_df <- complete(mice_mod, action=m)
+```
+
+Graphical representation of our data across time can be a useful way of exploring and better understanding the data. By creating visual representations, it is easier to identify patterns, trends and relationships between different variables. In the first graph we can observe inhabitants in each European country selected. The scond plot shows the decreasing tendency in terms of gender gap in the full-time employment-to-population rate in some selected countries.
+
+```{r}
+ggplot(final_df,mapping=aes(x=Year, 
+                            y=Value,
+                            color=Country,
+                            group=1))+ geom_point()
+
+final_df %>% 
+  filter(Country == "ESP" | Country == "GBR" | Country == "FRA" | Country == "ITA" | Country == "DEU") %>% 
+  ggplot() + 
+  aes(x=Year,y=Gendergap_full,
+      color=Country, group=1)+ 
+  geom_point()
+```
+
+The gender gap in employment-to-population rate and percentage of births out of marriage are two variables whose relationship has been often examined by social scientists. Generally, when the gender gap in employment-to-population rate is high, the percentage of births outside of marriage tends to be lower. This suggests a negative relationship between these two variables, a phenomenon that likely occurs because women who are employed are more likely to persue the relational stability added to the previous economic security that comes with employment. This may encourage marriage and reduce the number of births out of wedlock. 
+
+```{r}
+ggplot(final_df,mapping=aes(x=Gender_gap, 
+                            y=Births_outmarr,
+                            color=Country,
+                             group=1))+ geom_point()
+
+```
+
+Through histograms, we can easily observe the most frequent values and distributions of our variables. In this case, with the data across Europe, we can see that the most frequent age for childbirth is around 30, with a distribution of frequencies skewed to the left and values ranging from 25 to 33. Similarly, the mode for neo-natal mortality rate is around 2%, and for unemployment among young people it is around 7%. 
+
+```{r}
+hist(final_df$Age_Childbirth)
+hist(final_df$Young_unemployed)
+hist(final_df$Neonatal_mortality_rate)
+```
+
+Boxplots are an effective visual tool for comparing the distributions of similar categories. In this particular boxplot it is interesting to note the differences between the distribution of those in the age range of 15-19 and those in the age range of 20-24. The median and all the quartiles are higher for the age group of 20-24 than for 15-19. This can help inform us of the differences between the two age groups and may help in decision making based on age.
+
+The reasons behind this, may be due to the fact that individuals in the 20-24 age range may have more experience in the job market and have more trouble finding employment as compared to those between the ages of 15-19 who, in many cases, lack the experience and skills needed for certain jobs so are in most cases studying. Additionally, individuals in the 20-24 age range may have had a longer time to become disengaged from school, thus increasing the likelihood of not being in school or training program.
+```{r}
+bp<-ggplot(final_df,mapping=aes(y=Youngadult_unemployed))+
+                                geom_boxplot(fill="Orange")
+bp1<-ggplot(final_df,mapping=aes(y=Young_unemployed))+
+                                geom_boxplot(fill="Red")
+ggarrange(bp, bp1,
+          ncol = 2, nrow = 1)
+```
+
+It's also a good idea to plot data in maps in order gain more insight about it.
+
+```{r}
+data_map <- final_df %>% 
+          transmute(
+            Divorce_rate,
+            Age_Childbirth,
+            Country = case_when(
+                                Country %in% "PRT" ~ "Portugal",
+                                Country %in% "BEL" ~ "Belgium",
+                                Country %in% "GRC" ~ "Greece",
+                                Country %in% "ESP" ~ "Spain",
+                                Country %in% "CZE" ~ "Czech Republic",
+                                Country %in% "SVK" ~ "Slovakia",
+                                Country %in% "NLD" ~ "Netherlands",
+                                Country %in% "FIN" ~ "Finland",
+                                Country %in% "ITA" ~ "Italy",
+                                Country %in% "IRL" ~ "Ireland",
+                                Country %in% "POL" ~ "Poland",
+                                Country %in% "FRA" ~ "France",
+                                Country %in% "DEU" ~ "Germany",
+                                Country %in% "SWE" ~ "Sweden",
+                                Country %in% "AUT" ~ "Austria",
+                                Country %in% "DNK" ~ "Denmark",
+                                Country %in% "EST" ~ "Estonia",
+                                Country %in% "LUX" ~ "Luxembourg",
+                                Country %in% "SVN" ~ "Slovenia",
+                                Country %in% "LVA" ~ "Latvia",
+                                Country %in% "NOR" ~ "Norway",
+                                Country %in% "ISL" ~ "Iceland",
+                                Country %in% "CHE" ~ "Switzerland",
+                                Country %in% "LTU" ~ "Lithuania"
+                                )
+          ) %>% 
+  group_by(Country) %>% 
+  summarise_all(mean) %>% 
+  drop_na
+
+map_europe <- giscoR::gisco_get_countries(
+    region="Europe") 
+
+final_map <- map_europe %>% 
+  full_join(data_map,
+    by = c("NAME_ENGL" = "Country")        
+)
+
+ggplot(final_map) +
+  geom_sf(aes(fill=Divorce_rate)) +
+  coord_sf(xlim=c(-20, 30),
+           ylim=c(30, 85)) +
+  scale_fill_viridis_c() +
+  labs(fill="Divorce rate") +
+  theme(legend.position=c(0, 0),
+        legend.justification=c(0, 0)) + 
+  theme_minimal()
+
+ggplot(final_map) +
+  geom_sf(aes(fill=Age_Childbirth)) +
+  coord_sf(xlim=c(-20, 30),
+           ylim=c(30, 85)) +
+  scale_fill_viridis_c() +
+  labs(fill="Mean age of women at childbirth") +
+  theme(legend.position=c(0, 0),
+        legend.justification=c(0, 0)) + 
+  theme_minimal()
+
+```
+
+The first map we plotted shows a higher divorce rate in Central and Eastern European countries compared to the Mediterranean countries. This could be explained by the socio-cultural, economic, and religious factors that could be at play in these regions. For example, our second plot indicates that there is a correlation between the divorce rate and the mean age of women at childbirth, suggesting that delaying marriage and childbirth may allow for a better partner selection, thus disencouraging future divorces. This could explain why the Mediterranean countries, where marriage and childbirth is typically delayed, have a lower divorce rate.
+
+Many of the dataset's variables contain a high degree of variability or variance. To normalize this data, we can apply logarithmic transformation to the data's values. This will reduce the variance, allowing for better interpretation and analysis of the data. Unbalanced variables are those with higher variance which can be normalized using logarithmic transformation.
+
+```{r}
+plot(final_df$Young_unemployed)
+plot(final_df$Infant_mortality_rate)
+plot(final_df$Father_paid_paternity_wks)
+plot(final_df$Fertility_rate_young)
+plot(final_df$Mother_paid_paternity_wks)
+plot(final_df$Neonatal_mortality_rate)
+
+final_df_trans <- final_df %>%
+  transmute(
+    Country,
+    Year,
+    Births_outmarr,
+    Age_Childbirth,
+    Gendergap_full,
+    Young_unemployed_log = log(Young_unemployed),
+    Youngadult_unemployed,
+    Infant_mortality_rate_log = log(Infant_mortality_rate),
+    Father_paid_paternity_wks_log = log(Father_paid_paternity_wks),
+    Fertility_rate_young_log = log(Fertility_rate_young),
+    Marriage_rate,
+    Mother_paid_paternity_wks_log = log(Mother_paid_paternity_wks),
+    Neonatal_mortality_rate_log = log(Neonatal_mortality_rate),
+    Gender_gap,
+    Divorce_rate,
+    Fertility_rate
+  )
+```
+
+
+# 4 Applying PCA
+
+In this section we are doing a Principal Component Analysis from our selected data frame. The PCA variable contains information about the variation explained by each principal component, the total variation explained by all components, and the loading of each variable on each component. This can be useful for reducing the number of variables in the dataset while preserving as much of the variance as possible.
+
+```{r}
+df_num <- final_df %>% select(-Country, -Year) 
+pca <- prcomp(df_num,scale=T)
+summary(pca)
+```
+
+In the principal component analysis, we can see that the first principal component, PC1, explains the largest proportion of variance (31.34%), followed by PC2 (20.17%), PC3 (11.15%), PC4 (6.97%), PC5 (5.94%) with continuously decreasing values. This shows that the first 5 principal components explain 75.57% of the variance in the dataset.
+
+The standard deviation of each principal component is a measure of how much variance is explained by that component. The first principal component (PC1) has the highest standard deviation (2.17), indicating that it explains the most variance in the dataset. In general, the higher the standard deviation, the more variance is explained.
+
+Taking into account our data we can say that with the first component we can explain 31.3% family dynamics in the selected European countries. If we place all the countries in a line it would be possible for us explain all that amount of differences, if we add a second component we add a 20.2% percent more, which means that using a plane we can explain 51.5%. We see how the bards decrease a lot at the beggining and then they stop. In my case I would just select the first 3 components for the analysis as the rest of values start to be too marginal.
+
+```{r}
+library(factoextra)
+fviz_screeplot(pca, addlabels = TRUE) 
+```
+
+The first component is largely made up of variables associated with childbirth and gender including age at childbirth, births out of marriage, gender gap in full income, gender gap in value added, fertility rate among young adults, parity rate, and father's paid paternity weeks. It also includes variables related to mortality such as infant mortality rate and neonatal mortality rate. This suggests a strong link between having kids younger and births out of marriage and unemployment among young people.
+```{r}
+pca$rotation[,1]
+barplot(pca$rotation[,1], las=2, col="darkblue") #first component is HDI (human development index)
+
+```
+
+
+It is crucial to notice that most influential variables to explain family dynamics through different years and countries in Europe is related to infant and young components of the family. All variables above the average contribution are related to childhood. This tells us a lot about western cultures, where the gravitational center of the family is typically placed around the kids and childhood. This can manifest in many ways, including putting the childrens' needs and wants before the adults and dedicating more general attention to the kids. This differs to many other cultures, where the eldest family members are typically the most revered and respected. In many Asian countries, the family unit is typically centered around honoring and showing respect to the elderly, while western families are more centered child's correct development and growth. This can manifest in many ways, such as the elders being or not more deeply involved in the family's decision-making processes and having their opinions valued more highly.
+
+```{r}
+fviz_contrib(pca, choice = "var", axes = 1)
+```
+
+
+In the second component it's interesting to observe that the three first variables above average are related to gender and marital relations. In Western countries, the standard nuclear family structure consists of a married couple raising their children with the support of their extended family—typically, the grandparents. This structure has come under scrutiny in recent years, as economic and social trends have challenged traditional family roles and values.
+
+The rising divorce rates have caused an increase in single-parent households, which tend to be far less stable than traditional nuclear families. Parents also have to grapple with balancing their roles as both parents and providers, an especially difficult task in today’s competitive job market. For women, the introduction of work into the family structure has caused a complete reversal of traditional gender roles, creating tension between different generations about what should and should not be expected of mothers and fathers.
+
+```{r}
+barplot(pca$rotation[,2], las=2, col="darkblue") 
+fviz_contrib(pca, choice = "var", axes = 2)
+```
+
+
+# 5 Applying Clustering
+
+The data will be divided into five groups of equal size, as indicated by the bar chart. The clusters are based on the clustering algorithm k-means, which finds clusters by minimizing the distance between the data points and their cluster's centers. The nstart parameter is used to provide different initial starting points for the clusters, which will in turn yield different solutions. 
+
+```{r include=FALSE}
+library(cluster)
+library(mclust)
+```
+
+
+```{r}
+k = 4 
+name.model = kmeans(scale(df_num), centers=k, nstart =10000)
+name.model
+groups = name.model$cluster
+barplot(table(groups), col = "blue") 
+```
+
+The K-means clustering algorithm has been used to create 4 distinct clusters of countries based on socio-economic indicators. Each cluster has a set of features such as fertility rate, young adult unemployment, mother paid paternity weeks and so on that indicates their systemic differences. These clusters allow us to identify key similarities and differences between countries such as the gender gap, divorce rate, and fertility rate. 
+  
+  -Cluster 1 has a relatively high "Fertility rate", "Infant mortality rate" and "Younger Unemployed rate", and a relatively lower "Births out of marriage". This cluster could be related to countries like Albania, Bosnia and Herzegovina, Bulgaria, Kosovo and Macedonia. However, these where not added in this analysis, which might explain why cluster 1 is that little. 
+  
+  -Cluster 2 has a relatively high "Marriage rate" and "Mother_paid_paternity_wks" and a relatively lower "Fertility rate". It's the second more frequent culster, it could be referring to countries such as Austria and Germany that have relatively high marriage rate and restrictions on young people to access the job market. 
+  
+  -Cluster 3 has a relatively high "Births out of marriage", low "Neonatal Mortality rate", lower "Marriage rate" and "Mother paid paternity" weeks rate. It's the most frequent, it's difficult to identify what type of countries are we referring to.
+  
+  -Cluster 4 has a low "Gender gap" and "Fertility rate" and a relatively lower "Young adult unemployed rate" and "Divorce rate". This cluster is likely to represent countries such as Sweden and Finland that have relatively low gender gap, high fertility rate and fewer restrictions on young people to access the job market.
+
+The general idea from comparing different clusters is that countries with different policies and social norms have different fertility rates, marriage rates, gender gap, neonatal mortality rates, young adult unemployed rates, and divorce rates. Different clusters appear to represent countries with different combinations of these rates and policies. These combinations could reflect countries with different levels of economic development, different cultural values and norms, and different levels of state regulation and control.
+
+From a sociological point of view, this data shows that when it comes to family dynamics, there are distinct differences between countries. Certain countries are more likely to have birth rates outside of marriage, unequal gender gaps in the workforce, higher rates of young people unemployed, and higher rates of infant mortality than others. In addition, countries with more traditional values for family structures such as high rates of fertility and marriage, better paid paternity leave for fathers, and lower neonatal mortality rates tend to have lower gender gaps and higher fertility rates. This data shows that family dynamics do vary significantly from country to country, and can significantly impact the lives of individuals.
+
+Now we are creating a barplot of the 5 clusters from the k-means clustering model. The barplot is plotting each of the cluster centers' values for each of the features, which allows us to visualize the cluster means and compare them easily.In this context, we observe we could join the variables related to gender gap with the other 2 related to young young-adults unemployed. All these variables are related to employment, even if they are taking into account different things, such as gender and age, they behave relatively similar. Other interesting insight is that group only contains maternity paid weeks, while in other the total population goes alone. 
+
+```{r}
+centers=name.model$centers
+barplot(centers[1,], las=2, col="darkblue") 
+barplot(centers[2,], las=2, col="darkblue") 
+barplot(centers[3,], las=2, col="darkblue")
+barplot(centers[4,], las=2, col="darkblue") 
+```
+
+This visualization shows the silhouette coefficient of the clustered data when k-means clustering is used. The silhouette coefficient is a measure of how similar or different each observation within a cluster is compared with other observations in the same cluster. The plot indicates no clear optimal number of clusters, but it seems that reasonable number of clusters would be between 2 and 3.
+
+```{r}
+b <-fviz_nbclust(scale(df_num), kmeans, method = 'silhouette', k.max = 20, nstart = 1000)
+b
+```
+
+```{r}
+fit.km <- eclust(df_num, "kmeans", stand = T, k=3, graph = T)
+```
+
+
+
+# 6 Conclusions
+
+Through principal component analysis and k-means clustering it was possible to investigate the family dynamics in selected European countries from the merged data sets. From the principal component analysis, it was found that the first five principal components explain 75.57% of the variance. It was possible to associate it with childbirth, gender and mortality, which made up the largest portion of the first principal component. The k-means clustering algorithm identified four distinct clusters of countries based on socio-economic indicators. It was observed that countries with more traditional values for family structures such as high fertility rates and marriage rates, better paid paternity leave for fathers, and lower neonatal mortality rates tend to have lower gender gaps and higher fertility rates. Overall, this analysis shows that there are differences in family dynamics between European countries, which can be seen in the socio-economic indicators. 
+
+
+
+
+
+
+
+
+
